@@ -74,6 +74,70 @@ omi --json local task search "taxes" --include-completed
 
 Conclua ou exclua tarefas somente quando solicitado explicitamente pelo usuário:
 
+Apenas conclua ou exclua tarefas quando o usuário solicitar expressamente:
+
 ```bash
-omi --json local task complete task_1
+omi --json local task complete task_123
+omi --json local task delete task_123 --yes
 ```
+
+`omi local screenshot SCREENSHOT_ID --output PATH` grava a captura de tela no disco e ainda imprime JSON no stdout para scripts. O ID da captura de tela geralmente vem de `local search-screen` ou de consulta SQL na tabela `screenshots`. Se o Desktop retornar uma falha estruturada como `screenshot_pending`, `screenshot_file_missing` ou `screenshot_chunk_corrupted`, o modo JSON preserva os campos `reason`, `hint` e `screenshot_id` no stderr para que os agentes possam tentar novamente com um ID mais antigo ou relatar o bloqueio exato. Valide as saídas bem-sucedidas com `file PATH` antes de passá-las para ferramentas de visão.
+
+## Exemplo Prático: Loop de Agente Python
+
+```python
+import json
+import subprocess
+from typing import Any
+
+def omi(*args: str) -> Any:
+    """Invoke the omi CLI in JSON mode, raising on non-success exit codes."""
+    result = subprocess.run(
+        ["omi", "--json", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        # The CLI prints structured errors to stderr in JSON mode:
+        # {"error": "...", "detail": "..."}
+        try:
+            err = json.loads(result.stderr)
+        except json.JSONDecodeError:
+            err = {"error": result.stderr.strip()}
+        raise RuntimeError(f"omi exited {result.returncode}: {err}")
+    return json.loads(result.stdout) if result.stdout.strip() else None
+
+# Read all open action items and mark anything older than 30 days complete.
+from datetime import datetime, timedelta, timezone
+
+cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+items = omi("action-item", "list", "--open")
+for item in items or []:
+    created = datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))
+    if created < cutoff:
+        omi("action-item", "complete", item["id"])
+```
+
+## Gerenciamento de Limites de Taxa (Handling rate limits)
+
+Memórias: 120/hora. Conversas: 25/hora. Criações em lote: 15/hora.
+
+```python
+result = subprocess.run(["omi", "--json", "memory", "create", text], capture_output=True, text=True)
+if result.returncode == 4:                             # rate limited
+    err = json.loads(result.stderr)
+    # err["detail"] looks like: "Retry in 12s. ..."
+    time.sleep(parse_retry_window(err["detail"]) or 60)
+```
+
+## Dicas Úteis (Tips)
+
+* Use `--profile <nome>` se o seu agente gerencia várias contas Omi. Cada perfil tem sua própria credencial e base de API.
+* Use `--api-base http://localhost:8080` para testes locais com o backend.
+* Use `OMI_LOCAL_API_URL` e `OMI_LOCAL_TOKEN` para substituir as configurações de Desktop API local do perfil em uma única execução.
+* Use `--verbose` para depuração — registra `METHOD path → status (Ns)` no stderr sem afetar o stdout, mantendo o modo JSON válido.
+* Para enviar conteúdo para uma conversa por pipe, use `--text -`:
+  ```bash
+  cat meeting_notes.md | omi conversation create --text - --text-source other_text
+  ```
